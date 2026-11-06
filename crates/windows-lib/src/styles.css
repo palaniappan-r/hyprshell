@@ -8,6 +8,19 @@
     border: var(--border-size, 3px) var(--border-style, solid) var(--border-color, rgba(90, 90, 120, 0.4));
 }
 
+/* Keep the switcher surface tight to the panel so compositor blur cannot
+ * fill an extra padded rectangle around it. */
+.window.switch {
+    padding: 0;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+}
+
+.window.switch .monitor {
+    box-shadow: none;
+}
+
 .workspace {
     font-size: 1.8rem;
     font-weight: bolder;
@@ -50,4 +63,15 @@
 .client-image {
     margin-top: 4px;
     margin-bottom: 4px;
+}
+
+.client-workspace {
+    font-size: 1rem;
+    font-weight: bold;
+    min-width: 20px;
+    min-height: 20px;
+    padding: 2px 6px;
+    border-radius: 8px;
+    background: var(--bg-window-color, rgba(20, 20, 20, 0.9));
+    border: 1px solid var(--border-color, rgba(90, 90, 120, 0.4));
 }

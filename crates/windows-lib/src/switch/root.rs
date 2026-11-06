@@ -64,7 +64,8 @@ impl SimpleComponent for SwitchRoot {
     view! {
         #[root]
         gtk::ApplicationWindow {
-            set_css_classes: &["window"],
+            set_css_classes: &["window", "switch"],
+            set_decorated: false,
             set_default_size: (100, 100),
             match model.switch.switch_workspaces {
                 true => {
@@ -328,6 +329,17 @@ impl SwitchRoot {
                 scale,
                 monitor_data: monitor.clone(),
                 data: client.clone(),
+                workspace_label: if client.workspace > 0 {
+                    client.workspace.to_string()
+                } else {
+                    hypr_data
+                        .workspaces
+                        .find_by_first(&client.workspace)
+                        .map_or_else(
+                            || "?".to_string(),
+                            |workspace| workspace.name.trim_start_matches("special:").to_string(),
+                        )
+                },
             });
         }
         drop(lock);

@@ -14,6 +14,7 @@ pub struct Clients {
     pub id: ClientId,
     scale: f64,
     monitor_data: MonitorData,
+    workspace_label: String,
 }
 
 #[derive(Debug)]
@@ -27,6 +28,7 @@ pub struct ClientsInit {
     pub data: ClientData,
     pub id: ClientId,
     pub scale: f64,
+    pub workspace_label: String,
 }
 
 #[derive(Debug)]
@@ -61,10 +63,23 @@ impl FactoryComponent for Clients {
                         },
                     },
                     set_label_align: 0.5,
-                    #[name(image)]
-                    gtk::Image {
-                        set_css_classes: if self.data.enabled { &["client-image"] } else { &["client-image", "monochrome"] },
-                        set_pixel_size: calc_image_size(self.monitor_data.height, self.monitor_data.width, self.scale),
+                    gtk::Overlay {
+                        #[name(image)]
+                        gtk::Image {
+                            set_css_classes: if self.data.enabled { &["client-image"] } else { &["client-image", "monochrome"] },
+                            set_pixel_size: calc_image_size(self.monitor_data.height, self.monitor_data.width, self.scale),
+                        },
+                        add_overlay = &gtk::Label {
+                            set_css_classes: &["client-workspace"],
+                            set_label: &self.workspace_label,
+                            set_tooltip_text: Some(&format!("Workspace {}", self.workspace_label)),
+                            set_halign: gtk::Align::End,
+                            set_valign: gtk::Align::End,
+                            set_margin_end: 6,
+                            set_margin_bottom: 6,
+                            set_ellipsize: pango::EllipsizeMode::End,
+                            set_max_width_chars: 10,
+                        },
                     }
                 }
             }
@@ -79,6 +94,7 @@ impl FactoryComponent for Clients {
             monitor_data: init.monitor_data,
             id: init.id,
             scale: init.scale,
+            workspace_label: init.workspace_label,
         }
     }
 
