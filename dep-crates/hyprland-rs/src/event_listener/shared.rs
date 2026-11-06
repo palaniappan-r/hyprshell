@@ -815,30 +815,30 @@ pub(crate) fn event_parser(event: &str) -> crate::Result<Vec<Event>> {
         Ok(Either::Left((event_type, args))) => match event_type {
             ParsedEventType::WorkspaceChangedV2 => {
                 Ok(Event::WorkspaceChanged(WorkspaceEventData {
-                    id: parse_int!(get![ref args;0], event: "WorkspaceChangedV2"),
+                    id: crate::data::workspace_key(get![ref args;0]).map_err(HyprError::Other)?,
                     name: parse_string_as_work(get![args;1]),
                 }))
             }
             ParsedEventType::WorkspaceDeletedV2 => {
                 Ok(Event::WorkspaceDeleted(WorkspaceEventData {
-                    id: parse_int!(get![ref args;0], event: "WorkspaceDeletedV2"),
+                    id: crate::data::workspace_key(get![ref args;0]).map_err(HyprError::Other)?,
                     name: parse_string_as_work(get![args;1]),
                 }))
             }
             ParsedEventType::WorkspaceAddedV2 => Ok(Event::WorkspaceAdded(WorkspaceEventData {
-                id: parse_int!(get![ref args;0], event: "WorkspaceAddedV2"),
+                id: crate::data::workspace_key(get![ref args;0]).map_err(HyprError::Other)?,
                 name: parse_string_as_work(get![args;1]),
             })),
             ParsedEventType::WorkspaceMovedV2 => {
                 Ok(Event::WorkspaceMoved(WorkspaceMovedEventData {
-                    id: parse_int!(get![ref args;0], event: "WorkspaceMovedV2"),
+                    id: crate::data::workspace_key(get![ref args;0]).map_err(HyprError::Other)?,
                     name: parse_string_as_work(get![args;1]),
                     monitor: get![args;2],
                 }))
             }
             ParsedEventType::WorkspaceRename => {
                 Ok(Event::WorkspaceRenamed(NonSpecialWorkspaceEventData {
-                    id: parse_int!(get![args;0], event: "WorkspaceRenamed"),
+                    id: crate::data::workspace_key(get![ref args;0]).map_err(HyprError::Other)?,
                     name: get![args;1],
                 }))
             }
@@ -890,7 +890,8 @@ pub(crate) fn event_parser(event: &str) -> crate::Result<Vec<Event>> {
             ParsedEventType::WindowClosed => Ok(Event::WindowClosed(Address::new(get![args;0]))),
             ParsedEventType::WindowMovedV2 => Ok(Event::WindowMoved(WindowMoveEvent {
                 window_address: Address::fmt_new(get![ref args;0]),
-                workspace_id: parse_int!(get![ref args;1], event: "WindowMoved"),
+                workspace_id: crate::data::workspace_key(get![ref args;1])
+                    .map_err(HyprError::Other)?,
                 workspace_name: parse_string_as_work(get![args;2]),
             })),
             ParsedEventType::ActiveSpecial => {
@@ -967,4 +968,33 @@ pub(crate) fn event_parser(event: &str) -> crate::Result<Vec<Event>> {
     }
 
     Ok(events)
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+
+    #[test]
+    fn workspace_events_accept_legacy_ids_and_modern_addresses() {
+        for address in ["3", "-99", "name:dev", "special:scratchpad"] {
+            let expected = crate::data::workspace_key(address).unwrap();
+            for event in ["workspacev2", "createworkspacev2", "destroyworkspacev2"] {
+                let parsed = event_parser(&format!("{event}>>{address},test")).unwrap();
+                let id = match &parsed[0] {
+                    Event::WorkspaceChanged(data)
+                    | Event::WorkspaceAdded(data)
+                    | Event::WorkspaceDeleted(data) => data.id,
+                    other => panic!("unexpected event: {other:?}"),
+                };
+                assert_eq!(id, expected);
+            }
+            for event in [
+                format!("moveworkspacev2>>{address},test,DP-1"),
+                format!("renameworkspace>>{address},test"),
+                format!("movewindowv2>>123,{address},test"),
+            ] {
+                assert!(event_parser(&event).is_ok(), "{event}");
+            }
+        }
+    }
 }

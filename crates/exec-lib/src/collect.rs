@@ -202,3 +202,26 @@ pub fn get_client_classes() -> Vec<String> {
         .map(|client| client.class.clone())
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a running Hyprland session; reads IPC without changing focus"]
+    fn collect_from_running_hyprland() -> anyhow::Result<()> {
+        let (clients, workspaces, monitors, _, _, _) = collect_hypr_data(None)?;
+        assert!(!monitors.is_empty());
+        assert!(!workspaces.is_empty());
+        for (_, client) in &clients {
+            assert!(workspaces.find_by_first(&client.workspace).is_some());
+        }
+        println!(
+            "Collected {} clients, {} workspaces, {} monitors",
+            clients.len(),
+            workspaces.len(),
+            monitors.len()
+        );
+        Ok(())
+    }
+}

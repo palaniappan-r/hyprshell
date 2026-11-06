@@ -109,9 +109,26 @@ pub fn switch_workspace(workspace_id: WorkspaceId) -> anyhow::Result<()> {
     }
 
     if workspace_id < 0 {
-        switch_special_workspace(workspace_id).with_context(|| {
-            format!("Failed to execute switch special workspace with id {workspace_id}")
-        })?;
+        let workspace = Workspaces::get()?
+            .into_iter()
+            .find(|w| w.id == workspace_id)
+            .context("workspace not found")?;
+        if workspace.name.starts_with("special:") {
+            switch_special_workspace(workspace_id).with_context(|| {
+                format!("Failed to execute switch special workspace with id {workspace_id}")
+            })?;
+        } else {
+            let disp = hyprland::dispatch_new::Dispatch::FocusWorkspace(
+                hyprland::dispatch_new::WorkspaceIdentifier::Name(workspace.name.clone()),
+                false,
+            );
+            if let Err(e) = disp.apply() {
+                warn!("Failed to switch named workspace: {e}, trying legacy syntax");
+                Dispatch::call(DispatchType::Workspace(
+                    WorkspaceIdentifierWithSpecial::Name(&workspace.name),
+                ))?;
+            }
+        }
     } else {
         switch_normal_workspace(workspace_id).with_context(|| {
             format!("Failed to execute switch workspace with id {workspace_id}")
