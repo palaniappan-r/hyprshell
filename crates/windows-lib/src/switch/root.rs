@@ -10,23 +10,26 @@ use relm4::adw::glib::ControlFlow;
 use relm4::adw::gtk;
 use relm4::adw::gtk::glib;
 use relm4::adw::prelude::*;
-use relm4::gtk::gdk::Key;
+use relm4::gtk::gdk::{Device, Key, ModifierType};
 use relm4::gtk::{EventControllerKey, Orientation, SelectionMode};
 use relm4::prelude::*;
 use std::time::Duration;
 use tracing::{debug, error, trace};
 
 const KILL_TIMEOUT: Duration = Duration::from_millis(200);
+const SHOW_DELAY: Duration = Duration::from_millis(150);
 
 #[derive(Debug)]
 pub struct SwitchRoot {
     general: config_lib::WindowsGeneral,
     switch: config_lib::Switch,
     open: bool,
+    show_generation: u64,
     data: SwitchData,
     // gtk
     window: gtk::ApplicationWindow,
     controller: Option<gtk::EventController>,
+    keyboard: Option<(Device, glib::SignalHandlerId)>,
     /// Regex for removing HTML tags from strings
     remove_html: Regex,
     /// Factory for workspace mode (workspaces)
@@ -40,6 +43,8 @@ pub enum SwitchRootInput {
     SetSwitch(config_lib::Switch),
     SetGeneral(config_lib::WindowsGeneral),
     OpenSwitch(Direction),
+    ShowSwitch(u64),
+    CheckModifiers,
     Switch(Direction),
     CloseSwitch(bool),
     CloseCurrentItem,
@@ -111,12 +116,31 @@ impl SimpleComponent for SwitchRoot {
             .launch(gtk::FlowBox::default())
             .detach();
 
+        let keyboard = WidgetExt::display(&root)
+            .default_seat()
+            .and_then(|seat| seat.keyboard())
+            .map(|keyboard| {
+                let sender = sender.clone();
+                let handler = keyboard.connect_modifier_state_notify(move |_| {
+                    sender.input(SwitchRootInput::CheckModifiers);
+                });
+                (keyboard, handler)
+            });
+        let focus_sender = sender.clone();
+        root.connect_is_active_notify(move |window| {
+            if window.is_active() {
+                focus_sender.input(SwitchRootInput::CheckModifiers);
+            }
+        });
+
         let model = Self {
             general: init.general,
             switch: init.switch,
             open: false,
+            show_generation: 0,
             window: root.clone(),
             controller: None,
+            keyboard,
             remove_html: Regex::new(r"<[^>]*>").expect("invalid regex"),
             data: SwitchData::default(),
             items,
@@ -155,8 +179,40 @@ impl SimpleComponent for SwitchRoot {
                         .input_sender()
                         .emit(SwitchRootInput::Switch(direction));
                 } else {
-                    self.open = true;
-                    self.open_switch(direction);
+                    self.open = self.prepare_switch(direction);
+                    if self.open {
+                        self.show_generation = self.show_generation.wrapping_add(1);
+                        if self.switch.modifier == config_lib::Modifier::None {
+                            self.show_switch();
+                        } else {
+                            let generation = self.show_generation;
+                            glib::timeout_add_local_once(SHOW_DELAY, move || {
+                                sender
+                                    .input_sender()
+                                    .emit(SwitchRootInput::ShowSwitch(generation));
+                            });
+                        }
+                    }
+                }
+            }
+            SwitchRootInput::ShowSwitch(generation) => {
+                // A quick release must not show the popup, and a timer from an
+                // earlier Alt-Tab must not shorten the delay for the next one.
+                if self.open && self.show_generation == generation {
+                    self.show_switch();
+                }
+            }
+            SwitchRootInput::CheckModifiers => {
+                // Before keyboard focus arrives, the device state may belong
+                // to the previously focused surface. Check only while active.
+                if self.open
+                    && self.window.is_active()
+                    && let Some((keyboard, _)) = &self.keyboard
+                    && !switch_modifier_is_held(self.switch.modifier, keyboard.modifier_state())
+                {
+                    trace!("Switch modifier is no longer held");
+                    self.open = false;
+                    self.close_switch(true);
                 }
             }
             SwitchRootInput::Switch(direction) => {
@@ -191,6 +247,12 @@ impl SimpleComponent for SwitchRoot {
             }
         }
     }
+
+    fn shutdown(&mut self, _widgets: &mut Self::Widgets, _output: relm4::Sender<Self::Output>) {
+        if let Some((keyboard, handler)) = self.keyboard.take() {
+            keyboard.disconnect(handler);
+        }
+    }
 }
 
 impl SwitchRoot {
@@ -204,10 +266,23 @@ impl SwitchRoot {
                     trace!("Key pressed: {:?}", key);
                     handle_key(key, k, kk, &sender_2.clone())
                 });
+                // The compositor's release binding may be missed while this
+                // layer surface owns the keyboard. Handle the release here too.
+                let modifier = self.switch.modifier;
+                let sender_2 = sender.clone();
+                key_controller.connect_key_released(move |_, key, _, _| {
+                    if is_switch_modifier(key, modifier) {
+                        trace!("Switch modifier released: {:?}", key);
+                        sender_2
+                            .input_sender()
+                            .emit(SwitchRootInput::CloseSwitch(true));
+                    }
+                });
                 if let Some(controller) = self.controller.take() {
                     self.window.remove_controller(&controller);
                 }
-                self.window.add_controller(key_controller);
+                self.window.add_controller(key_controller.clone());
+                self.controller = Some(key_controller.upcast());
             } else {
                 error!("Invalid kill key name: {}", self.switch.kill_key);
             }
@@ -216,7 +291,7 @@ impl SwitchRoot {
         }
     }
 
-    fn open_switch(&mut self, direction: Direction) {
+    fn prepare_switch(&mut self, direction: Direction) -> bool {
         let (hypr_data, active_prev) = match collect_data(&SortConfig {
             filter_current_monitor: self.switch.filter_by_current_monitor,
             filter_current_workspace: self.switch.filter_by_current_workspace,
@@ -231,7 +306,7 @@ impl SwitchRoot {
             Ok(data) => data,
             Err(e) => {
                 error!("Failed to collect data: {}", e);
-                return;
+                return false;
             }
         };
 
@@ -252,20 +327,21 @@ impl SwitchRoot {
                 self.general.items_per_row,
             )
         };
-        self.data = SwitchData {
-            active,
-            hypr_data: hypr_data.clone(),
-        };
+        self.data = SwitchData { active, hypr_data };
+        true
+    }
 
-        trace!("Showing window {:?}", self.window.id());
-        self.window.set_visible(true);
-        self.window.grab_focus();
-
+    fn show_switch(&mut self) {
+        let hypr_data = self.data.hypr_data.clone();
         if self.switch.switch_workspaces {
             self.populate_workspace_mode(&hypr_data, self.general.scale, self.data.active);
         } else {
             self.populate_clients_only_mode(&hypr_data, self.general.scale, self.data.active);
         }
+
+        trace!("Showing window {:?}", self.window.id());
+        self.window.set_visible(true);
+        self.window.grab_focus();
     }
 
     fn populate_workspace_mode(&mut self, hypr_data: &HyprlandData, scale: f64, active: Active) {
@@ -582,6 +658,24 @@ impl SwitchRoot {
     }
 }
 
+const fn switch_modifier_is_held(modifier: config_lib::Modifier, state: ModifierType) -> bool {
+    match modifier {
+        config_lib::Modifier::Alt => state.contains(ModifierType::ALT_MASK),
+        config_lib::Modifier::Ctrl => state.contains(ModifierType::CONTROL_MASK),
+        config_lib::Modifier::Super => state.contains(ModifierType::SUPER_MASK),
+        config_lib::Modifier::None => true,
+    }
+}
+
+const fn is_switch_modifier(key: Key, modifier: config_lib::Modifier) -> bool {
+    match modifier {
+        config_lib::Modifier::Alt => matches!(key, Key::Alt_L | Key::Alt_R),
+        config_lib::Modifier::Ctrl => matches!(key, Key::Control_L | Key::Control_R),
+        config_lib::Modifier::Super => matches!(key, Key::Super_L | Key::Super_R),
+        config_lib::Modifier::None => false,
+    }
+}
+
 fn handle_key(
     key: Key,
     s_key: Key,
@@ -644,6 +738,59 @@ impl Default for SwitchData {
                 monitor: -1,
             },
             hypr_data: HyprlandData::default(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_switch_modifier, switch_modifier_is_held};
+    use config_lib::Modifier;
+    use relm4::gtk::gdk::{Key, ModifierType};
+
+    #[test]
+    fn releasing_super_while_shift_is_held_ends_switching() {
+        let reverse = ModifierType::SUPER_MASK | ModifierType::SHIFT_MASK;
+        assert!(switch_modifier_is_held(Modifier::Super, reverse));
+        assert!(switch_modifier_is_held(
+            Modifier::Super,
+            ModifierType::SUPER_MASK
+        ));
+        assert!(!switch_modifier_is_held(
+            Modifier::Super,
+            ModifierType::SHIFT_MASK
+        ));
+        assert!(!switch_modifier_is_held(
+            Modifier::Super,
+            ModifierType::empty()
+        ));
+        assert!(switch_modifier_is_held(
+            Modifier::None,
+            ModifierType::empty()
+        ));
+    }
+
+    #[test]
+    fn only_configured_modifier_releases_close_switch() {
+        let modifiers = [
+            (Modifier::Alt, [Key::Alt_L, Key::Alt_R]),
+            (Modifier::Ctrl, [Key::Control_L, Key::Control_R]),
+            (Modifier::Super, [Key::Super_L, Key::Super_R]),
+        ];
+        for configured in [
+            Modifier::Alt,
+            Modifier::Ctrl,
+            Modifier::Super,
+            Modifier::None,
+        ] {
+            for (modifier, keys) in modifiers {
+                for key in keys {
+                    assert_eq!(is_switch_modifier(key, configured), modifier == configured);
+                }
+            }
+            for key in [Key::Tab, Key::Shift_L, Key::Shift_R, Key::Escape, Key::a] {
+                assert!(!is_switch_modifier(key, configured));
+            }
         }
     }
 }
