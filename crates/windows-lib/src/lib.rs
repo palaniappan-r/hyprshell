@@ -2,6 +2,7 @@ mod css;
 mod data;
 mod desktop_map;
 mod icon;
+mod preview;
 mod keybinds;
 mod next;
 pub mod overview;

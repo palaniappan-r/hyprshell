@@ -6,28 +6,37 @@ use core_lib::{Active, ByFirst, Direction, HyprlandData, SWITCH_NAMESPACE};
 use exec_lib::switch::{switch_client, switch_workspace};
 use gtk4_layer_shell::{KeyboardMode, Layer, LayerShell};
 use regex::Regex;
-use relm4::adw::glib::ControlFlow;
-use relm4::adw::gtk;
 use relm4::adw::gtk::glib;
 use relm4::adw::prelude::*;
+use relm4::adw::{self, gtk};
 use relm4::gtk::gdk::{Device, Key, ModifierType};
 use relm4::gtk::{EventControllerKey, Orientation, SelectionMode};
 use relm4::prelude::*;
-use std::time::Duration;
+use std::{cell::Cell, rc::Rc, time::Duration};
 use tracing::{debug, error, trace};
 
 const KILL_TIMEOUT: Duration = Duration::from_millis(200);
 const SHOW_DELAY: Duration = Duration::from_millis(150);
+const FADE_IN_MS: u32 = 120;
+const FADE_OUT_MS: u32 = 40;
 
 #[derive(Debug)]
 pub struct SwitchRoot {
     general: config_lib::WindowsGeneral,
     switch: config_lib::Switch,
     open: bool,
-    show_generation: u64,
+    show_generation: Rc<Cell<u64>>,
+    closing: bool,
+    client_columns: u8,
+    snapshot_session: crate::preview::SnapshotSession,
+    snapshot_cache: crate::preview::SnapshotCache,
+    original_active: Option<Active>,
+    focused_active: Option<Active>,
     data: SwitchData,
     // gtk
     window: gtk::ApplicationWindow,
+    fade_in: adw::TimedAnimation,
+    fade_out: adw::TimedAnimation,
     controller: Option<gtk::EventController>,
     keyboard: Option<(Device, glib::SignalHandlerId)>,
     /// Regex for removing HTML tags from strings
@@ -44,6 +53,7 @@ pub enum SwitchRootInput {
     SetGeneral(config_lib::WindowsGeneral),
     OpenSwitch(Direction),
     ShowSwitch(u64),
+    FinishClose(u64),
     CheckModifiers,
     Switch(Direction),
     CloseSwitch(bool),
@@ -92,9 +102,9 @@ impl SimpleComponent for SwitchRoot {
                         set_selection_mode: SelectionMode::None,
                         set_orientation: Orientation::Horizontal,
                         #[watch]
-                        set_max_children_per_line: u32::from(model.general.items_per_row),
+                        set_max_children_per_line: u32::from(model.client_columns),
                         #[watch]
-                        set_min_children_per_line: u32::from(model.general.items_per_row),
+                        set_min_children_per_line: u32::from(model.client_columns),
                     }
                 }
             }
@@ -133,12 +143,49 @@ impl SimpleComponent for SwitchRoot {
             }
         });
 
+        let fade_in = adw::TimedAnimation::new(
+            &root,
+            0.0,
+            1.0,
+            FADE_IN_MS,
+            adw::PropertyAnimationTarget::new(&root, "opacity"),
+        );
+        fade_in.set_easing(adw::Easing::EaseOutSine);
+        let weak_fade_in = fade_in.downgrade();
+        root.connect_map(move |_| {
+            if let Some(animation) = weak_fade_in.upgrade() {
+                animation.play();
+            }
+        });
+        let show_generation = Rc::new(Cell::new(0));
+        let fade_out = adw::TimedAnimation::new(
+            &root,
+            1.0,
+            0.0,
+            FADE_OUT_MS,
+            adw::PropertyAnimationTarget::new(&root, "opacity"),
+        );
+        fade_out.set_easing(adw::Easing::EaseInSine);
+        let generation = Rc::clone(&show_generation);
+        let close_sender = sender.clone();
+        fade_out.connect_done(move |_| {
+            close_sender.input(SwitchRootInput::FinishClose(generation.get()));
+        });
+
         let model = Self {
             general: init.general,
             switch: init.switch,
             open: false,
-            show_generation: 0,
+            show_generation,
+            closing: false,
+            client_columns: 1,
+            snapshot_session: Default::default(),
+            snapshot_cache: Default::default(),
+            original_active: None,
+            focused_active: None,
             window: root.clone(),
+            fade_in,
+            fade_out,
             controller: None,
             keyboard,
             remove_html: Regex::new(r"<[^>]*>").expect("invalid regex"),
@@ -175,22 +222,34 @@ impl SimpleComponent for SwitchRoot {
             }
             SwitchRootInput::OpenSwitch(direction) => {
                 if self.open {
-                    sender
-                        .input_sender()
-                        .emit(SwitchRootInput::Switch(direction));
+                    // Apply this key before a queued modifier release closes
+                    // the session; re-enqueueing could drop the final Tab.
+                    self.navigate(direction);
                 } else {
+                    // A new tap takes precedence over a fading old popup.
+                    if self.closing {
+                        self.finish_close();
+                    }
                     self.open = self.prepare_switch(direction);
                     if self.open {
-                        self.show_generation = self.show_generation.wrapping_add(1);
+                        self.show_generation
+                            .set(self.show_generation.get().wrapping_add(1));
                         if self.switch.modifier == config_lib::Modifier::None {
+                            self.prepare_popup();
                             self.show_switch();
                         } else {
-                            let generation = self.show_generation;
+                            // Focus on Tab, independently of the popup timer
+                            // and modifier release. Keep this session's MRU order.
+                            self.focus_selected();
+                            let generation = self.show_generation.get();
                             glib::timeout_add_local_once(SHOW_DELAY, move || {
                                 sender
                                     .input_sender()
                                     .emit(SwitchRootInput::ShowSwitch(generation));
                             });
+                            // Build the cards now so their one-frame captures
+                            // can finish during SHOW_DELAY, before mapping.
+                            self.prepare_popup();
                         }
                     }
                 }
@@ -198,8 +257,13 @@ impl SimpleComponent for SwitchRoot {
             SwitchRootInput::ShowSwitch(generation) => {
                 // A quick release must not show the popup, and a timer from an
                 // earlier Alt-Tab must not shorten the delay for the next one.
-                if self.open && self.show_generation == generation {
+                if self.open && self.show_generation.get() == generation {
                     self.show_switch();
+                }
+            }
+            SwitchRootInput::FinishClose(generation) => {
+                if self.closing && !self.open && self.show_generation.get() == generation {
+                    self.finish_close();
                 }
             }
             SwitchRootInput::CheckModifiers => {
@@ -327,19 +391,45 @@ impl SwitchRoot {
                 self.general.items_per_row,
             )
         };
+        self.original_active = Some(active_prev);
+        self.focused_active = None;
         self.data = SwitchData { active, hypr_data };
         true
     }
 
-    fn show_switch(&mut self) {
+    fn prepare_popup(&mut self) {
+        self.snapshot_session = Default::default();
         let hypr_data = self.data.hypr_data.clone();
+        self.snapshot_cache
+            .borrow_mut()
+            .retain(|(address, pid), _| {
+                hypr_data
+                    .clients
+                    .iter()
+                    .any(|(id, client)| id == address && client.pid == *pid && client.enabled)
+            });
         if self.switch.switch_workspaces {
             self.populate_workspace_mode(&hypr_data, self.general.scale, self.data.active);
         } else {
             self.populate_clients_only_mode(&hypr_data, self.general.scale, self.data.active);
         }
+    }
 
-        trace!("Showing window {:?}", self.window.id());
+    fn show_switch(&mut self) {
+        debug!(
+            ready_previews = self
+                .snapshot_session
+                .borrow()
+                .values()
+                .filter(|snapshot| snapshot.is_some())
+                .count(),
+            retained_previews = self.snapshot_cache.borrow().len(),
+            "Showing window switcher"
+        );
+        self.fade_in.reset();
+        self.window.set_can_target(true);
+        self.window.set_keyboard_mode(KeyboardMode::Exclusive);
+        self.window.set_opacity(0.0);
         self.window.set_visible(true);
         self.window.grab_focus();
     }
@@ -388,7 +478,38 @@ impl SwitchRoot {
         }
     }
 
-    fn populate_clients_only_mode(&mut self, hypr_data: &HyprlandData, scale: f64, active: Active) {
+    fn populate_clients_only_mode(
+        &mut self,
+        hypr_data: &HyprlandData,
+        _scale: f64,
+        active: Active,
+    ) {
+        let count = hypr_data
+            .clients
+            .iter()
+            .filter(|(_, client)| {
+                client.enabled && hypr_data.monitors.find_by_first(&client.monitor).is_some()
+            })
+            .count();
+        // Use the currently focused monitor, rather than the monitor of the
+        // highlighted target window, which can be on another display.
+        let focused = exec_lib::collect::get_current_monitor();
+        let monitor = focused
+            .as_ref()
+            .and_then(|current| hypr_data.monitors.find_by_first(&current.id))
+            .or_else(|| hypr_data.monitors.find_by_first(&active.monitor))
+            .or_else(|| hypr_data.monitors.first().map(|(_, monitor)| monitor));
+        let (width, height) = monitor.map_or((1280, 720), |monitor| {
+            (i32::from(monitor.width), i32::from(monitor.height))
+        });
+        let grid = crate::preview::layout::fit(count, width, height, self.general.items_per_row);
+        self.client_columns = grid.columns;
+        let flow = self.clients_only.widget();
+        flow.set_min_children_per_line(1);
+        flow.set_max_children_per_line(u32::from(grid.columns));
+        flow.set_min_children_per_line(u32::from(grid.columns));
+        // Let the surface shrink again when windows are closed.
+        self.window.set_default_size(100, 100);
         let mut lock = self.clients_only.guard();
         lock.clear();
 
@@ -396,14 +517,15 @@ impl SwitchRoot {
             if !client.enabled {
                 continue;
             }
-            let Some(monitor) = hypr_data.monitors.find_by_first(&client.monitor) else {
+            let Some(_monitor) = hypr_data.monitors.find_by_first(&client.monitor) else {
                 error!("Client {} has invalid monitor {}", id, client.monitor);
                 continue;
             };
             lock.push_back(ClientsInit {
                 id: *id,
-                scale,
-                monitor_data: monitor.clone(),
+                preview_size: (grid.width, grid.height),
+                snapshot_session: self.snapshot_session.clone(),
+                snapshot_cache: self.snapshot_cache.clone(),
                 data: client.clone(),
                 workspace_label: if client.workspace > 0 {
                     client.workspace.to_string()
@@ -447,12 +569,16 @@ impl SwitchRoot {
                 true,
                 &self.data.hypr_data,
                 self.data.active,
-                self.general.items_per_row,
+                self.client_columns,
             )
         };
 
         let old_active = self.data.active;
         self.data.active = new_active;
+
+        if !self.window.is_visible() {
+            self.focus_selected();
+        }
 
         if self.switch.switch_workspaces {
             self.update_workspace_active(old_active, new_active);
@@ -502,57 +628,64 @@ impl SwitchRoot {
         }
     }
 
+    fn focus_selected(&mut self) {
+        let active = self.data.active;
+        if self.focused_active != Some(active) && focus_target(active) {
+            self.focused_active = Some(active);
+        }
+    }
+
     fn close_switch(&mut self, do_switch: bool) {
         trace!("Hiding window {:?}", self.window.id());
-        self.window.set_visible(false);
-
-        // Clear UI
-        {
-            let mut lock = self.items.guard();
-            lock.clear();
+        let was_visible = self.window.is_visible();
+        self.fade_in.pause();
+        if was_visible {
+            // Hand input back immediately; only the old popup's pixels linger.
+            self.window.set_can_target(false);
+            self.window.set_keyboard_mode(KeyboardMode::None);
+            WidgetExt::display(&self.window).flush();
+            self.closing = true;
+            self.fade_out.set_value_from(self.window.opacity());
+            self.fade_out.reset();
+            self.fade_out.play();
+        } else {
+            self.finish_close();
         }
-        {
-            let mut lock = self.clients_only.guard();
-            lock.clear();
-        }
 
-        if do_switch {
-            if let Some(id) = self.data.active.client {
-                debug!(
-                    "Switching to client {}",
-                    self.data
-                        .hypr_data
-                        .clients
-                        .iter()
-                        .find(|(cid, _)| *cid == id)
-                        .map_or_else(|| "<Unknown>".to_string(), |(_, c)| c.title.clone())
-                );
-                // Defer execution to ensure window is hidden first
-                glib::idle_add_local(move || {
-                    if let Err(e) = switch_client(id) {
-                        tracing::warn!("Failed to switch to client {id:?}: {e}");
+        let target = close_focus_target(
+            do_switch,
+            was_visible,
+            self.data.active,
+            self.original_active.take(),
+            self.focused_active.take(),
+        );
+        if let Some(target) = target {
+            if was_visible {
+                let generation = Rc::clone(&self.show_generation);
+                let closed_generation = generation.get();
+                let display = WidgetExt::display(&self.window);
+                glib::idle_add_local_once(move || {
+                    if generation.get() == closed_generation {
+                        // Ensure the compositor has released exclusive keyboard
+                        // focus, then switch without waiting for the fade-out.
+                        display.sync();
+                        focus_target(target);
                     }
-                    ControlFlow::Break
                 });
             } else {
-                let id = self.data.active.workspace;
-                debug!(
-                    "Switching to workspace {}",
-                    self.data
-                        .hypr_data
-                        .workspaces
-                        .iter()
-                        .find(|(wid, _)| *wid == id)
-                        .map_or_else(|| "<Unknown>".to_string(), |(_, w)| w.name.clone())
-                );
-                glib::idle_add_local(move || {
-                    if let Err(e) = switch_workspace(id) {
-                        tracing::warn!("Failed to switch to workspace {id:?}: {e}");
-                    }
-                    ControlFlow::Break
-                });
+                focus_target(target);
             }
         }
+    }
+
+    fn finish_close(&mut self) {
+        self.closing = false;
+        self.fade_out.pause();
+        self.window.set_visible(false);
+        self.window.set_opacity(1.0);
+        self.items.guard().clear();
+        self.clients_only.guard().clear();
+        self.snapshot_session.borrow_mut().clear();
     }
 
     fn close_item(&self) {
@@ -640,7 +773,7 @@ impl SwitchRoot {
                     true,
                     &hypr_data,
                     self.data.active,
-                    self.general.items_per_row,
+                    self.client_columns,
                 )
             };
         }
@@ -656,6 +789,40 @@ impl SwitchRoot {
             self.populate_clients_only_mode(&hypr_data, self.general.scale, self.data.active);
         }
     }
+}
+
+// A quick release needs no second focus dispatch: Tab already switched.
+// A visible popup must hand keyboard focus back when closing. Cancelling
+// a session that switched early restores the window it started from.
+fn close_focus_target(
+    commit: bool,
+    was_visible: bool,
+    selected: Active,
+    original: Option<Active>,
+    focused: Option<Active>,
+) -> Option<Active> {
+    if commit {
+        (was_visible || focused != Some(selected)).then_some(selected)
+    } else if focused.is_some() {
+        original
+    } else {
+        None
+    }
+}
+
+fn focus_target(active: Active) -> bool {
+    let result = if let Some(id) = active.client {
+        debug!("Switching to client {id}");
+        switch_client(id)
+    } else {
+        debug!("Switching to workspace {}", active.workspace);
+        switch_workspace(active.workspace)
+    };
+    if let Err(error) = result {
+        tracing::warn!("Failed to switch to {active:?}: {error}");
+        return false;
+    }
+    true
 }
 
 const fn switch_modifier_is_held(modifier: config_lib::Modifier, state: ModifierType) -> bool {
@@ -744,9 +911,61 @@ impl Default for SwitchData {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_switch_modifier, switch_modifier_is_held};
+    use super::{close_focus_target, is_switch_modifier, switch_modifier_is_held};
     use config_lib::Modifier;
+    use core_lib::Active;
     use relm4::gtk::gdk::{Key, ModifierType};
+
+    const ORIGINAL: Active = Active {
+        client: Some(1),
+        workspace: 1,
+        monitor: 0,
+    };
+    const SELECTED: Active = Active {
+        client: Some(2),
+        workspace: 2,
+        monitor: 0,
+    };
+
+    #[test]
+    fn quick_release_keeps_the_window_already_focused_on_tab() {
+        assert_eq!(
+            close_focus_target(true, false, SELECTED, Some(ORIGINAL), Some(SELECTED)),
+            None
+        );
+    }
+
+    #[test]
+    fn closing_popup_returns_keyboard_focus_to_its_final_selection() {
+        for focused in [Some(SELECTED), Some(ORIGINAL), None] {
+            assert_eq!(
+                close_focus_target(true, true, SELECTED, Some(ORIGINAL), focused),
+                Some(SELECTED)
+            );
+        }
+    }
+
+    #[test]
+    fn cancelling_restores_the_window_before_the_immediate_switch() {
+        for was_visible in [false, true] {
+            assert_eq!(
+                close_focus_target(false, was_visible, SELECTED, Some(ORIGINAL), Some(SELECTED)),
+                Some(ORIGINAL)
+            );
+            assert_eq!(
+                close_focus_target(false, was_visible, SELECTED, Some(ORIGINAL), None),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn release_retries_a_failed_early_focus() {
+        assert_eq!(
+            close_focus_target(true, false, SELECTED, Some(ORIGINAL), None),
+            Some(SELECTED)
+        );
+    }
 
     #[test]
     fn releasing_super_while_shift_is_held_ends_switching() {

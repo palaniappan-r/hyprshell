@@ -1,0 +1,19 @@
+// Edit with `hyprshell config edit`
+(
+    version: 4,
+    windows: (
+        scale: 2.2,
+        // Preferred columns; the preview grid adapts to window count and screen size.
+        items_per_row: 4,
+        overview: None,
+        switch: (
+            modifier: "super",
+            key: "Tab",
+            filter_by: [],
+            switch_workspaces: false,
+            exclude_workspaces: "special:S1|special:S2",
+            kill_key: 'q',
+        ),
+        switch_2: None,
+    ),
+)

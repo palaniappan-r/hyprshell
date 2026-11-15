@@ -12,6 +12,7 @@ It provides a customizable GUI for switching between windows or workspaces, laun
 ## Features
 
 - **Window Switching**: Switch between windows or workspaces using keyboard shortcuts in a GUI.
+- **Frozen Window Previews**: Capture one thumbnail per window when the switcher opens, with no continuous capture. See [build and usage instructions](docs/WINDOW_PREVIEWS.md).
 - **Customizable Keybindings**: Define your own keybindings for window switching and GUI interactions.
 - **Settings App**: Customize switching, launcher behavior, keybindings and themes using a settings app.
 - **Launcher Integration**: Launch applications directly from the GUI, sorted by usage frequency.

@@ -1,5 +1,5 @@
 use crate::icon::set_icon;
-use core_lib::{ClientData, ClientId, MonitorData};
+use core_lib::{ClientData, ClientId};
 use relm4::adw::gtk;
 use relm4::adw::prelude::*;
 use relm4::gtk::pango;
@@ -12,9 +12,10 @@ pub struct Clients {
     active: bool,
     data: ClientData,
     pub id: ClientId,
-    scale: f64,
-    monitor_data: MonitorData,
+    preview_size: (i32, i32),
     workspace_label: String,
+    snapshot_session: crate::preview::SnapshotSession,
+    snapshot_cache: crate::preview::SnapshotCache,
 }
 
 #[derive(Debug)]
@@ -24,11 +25,12 @@ pub enum ClientsInput {
 
 #[derive(Debug)]
 pub struct ClientsInit {
-    pub monitor_data: MonitorData,
     pub data: ClientData,
     pub id: ClientId,
-    pub scale: f64,
+    pub preview_size: (i32, i32),
     pub workspace_label: String,
+    pub snapshot_session: crate::preview::SnapshotSession,
+    pub snapshot_cache: crate::preview::SnapshotCache,
 }
 
 #[derive(Debug)]
@@ -48,26 +50,52 @@ impl FactoryComponent for Clients {
                 #[watch]
                 set_css_classes: if self.active { &["active", "client"] } else { &["client"] },
                 set_cursor_from_name: Some("pointer"),
-                set_width_request: scale(self.monitor_data.width, self.scale),
-                set_height_request: scale(self.monitor_data.height, self.scale),
+                set_width_request: self.preview_size.0,
+                set_height_request: self.preview_size.1,
                 gtk::Frame {
                     #[wrap(Some)]
-                    set_label_widget = &gtk::Label {
-                        set_overflow: gtk::Overflow::Visible,
+                    set_label_widget = &gtk::Box {
+                        set_css_classes: &["client-title"],
+                        set_orientation: gtk::Orientation::Horizontal,
+                        set_spacing: 6,
+                        set_width_request: (self.preview_size.0 - 12).max(1),
                         set_margin_start: 6,
-                        set_ellipsize: pango::EllipsizeMode::End,
-                        set_label: if self.data.title.trim().is_empty() {
-                            &self.data.class
-                        } else {
-                            &self.data.title
+                        #[name(title_icon)]
+                        gtk::Image {
+                            set_css_classes: &["client-title-icon"],
+                            set_pixel_size: 16,
+                            set_valign: gtk::Align::Center,
+                        },
+                        gtk::Label {
+                            set_css_classes: &["client-title-text"],
+                            set_overflow: gtk::Overflow::Visible,
+                            set_max_width_chars: 1,
+                            set_hexpand: true,
+                            set_xalign: 0.0,
+                            set_ellipsize: pango::EllipsizeMode::End,
+                            set_label: if self.data.title.trim().is_empty() {
+                                &self.data.class
+                            } else {
+                                &self.data.title
+                            },
                         },
                     },
                     set_label_align: 0.5,
                     gtk::Overlay {
-                        #[name(image)]
-                        gtk::Image {
-                            set_css_classes: if self.data.enabled { &["client-image"] } else { &["client-image", "monochrome"] },
-                            set_pixel_size: calc_image_size(self.monitor_data.height, self.monitor_data.width, self.scale),
+                        set_css_classes: &["client-thumbnail"],
+                        set_size_request: (self.preview_size.0, self.preview_size.1),
+                        gtk::DrawingArea {
+                            set_content_width: self.preview_size.0,
+                            set_content_height: self.preview_size.1,
+                        },
+                        #[name(preview)]
+                        add_overlay = &gtk::Picture {
+                            set_css_classes: &["client-preview"],
+                            set_can_shrink: true,
+                            set_content_fit: gtk::ContentFit::Contain,
+                            set_can_target: false,
+                            set_hexpand: true,
+                            set_vexpand: true,
                         },
                         add_overlay = &gtk::Label {
                             set_css_classes: &["client-workspace"],
@@ -91,10 +119,11 @@ impl FactoryComponent for Clients {
         Self {
             active: false,
             data: init.data,
-            monitor_data: init.monitor_data,
             id: init.id,
-            scale: init.scale,
+            preview_size: init.preview_size,
             workspace_label: init.workspace_label,
+            snapshot_session: init.snapshot_session,
+            snapshot_cache: init.snapshot_cache,
         }
     }
 
@@ -107,12 +136,16 @@ impl FactoryComponent for Clients {
     ) -> Self::Widgets {
         let widgets = view_output!();
 
-        // Set the icon for this client
-        let client_h_w =
-            scale(self.data.height, self.scale).min(scale(self.data.width, self.scale));
-        if client_h_w > 70 {
-            set_icon(&self.data.class, self.data.pid, &widgets.image);
-        }
+        set_icon(&self.data.class, self.data.pid, &widgets.title_icon);
+
+        crate::preview::attach(
+            &widgets.preview,
+            self.id,
+            self.data.pid,
+            self.preview_size,
+            self.snapshot_session.clone(),
+            self.snapshot_cache.clone(),
+        );
 
         widgets
     }
@@ -123,18 +156,5 @@ impl FactoryComponent for Clients {
                 self.active = active;
             }
         }
-    }
-}
-
-fn scale<T: Into<f64>>(value: T, scale: f64) -> i32 {
-    (value.into() / (15f64 - scale)) as i32
-}
-
-fn calc_image_size(height: u16, width: u16, scale_val: f64) -> i32 {
-    let client_h_w = scale(height, scale_val).min(scale(width, scale_val));
-    if client_h_w > 70 {
-        (f64::from(client_h_w.clamp(50, 600)) / 1.6) as i32 - 20
-    } else {
-        0 // Hide image for very small clients
     }
 }

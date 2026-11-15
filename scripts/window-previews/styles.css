@@ -1,0 +1,64 @@
+:root {
+    --border-color: rgba(7, 7, 7, 0);
+    --border-color-active: #e0af68;
+
+    --bg-color: rgba(7, 7, 7, 0.6);
+    --bg-color-hover: rgba(50, 50, 50, 0.6);
+
+    --border-radius: 0px;
+    --border-size: 2px;
+    --border-style: solid;
+
+    --text-color: #e0e0e0;
+
+    --window-padding: 2px;
+    --bg-window-color: rgba(7, 7, 7, 0.6);
+}
+
+* {
+    font-family: "JetBrainsMono Nerd Font";
+    font-size: 17px;
+    font-weight: 400;
+    box-shadow: none;
+    text-shadow: none;
+    transition: none;
+    animation: none;
+}
+.client.active label {
+    color: #e0af68;
+}
+.monitor {
+    min-width: 0;
+}
+
+.client {
+    min-width: 0;
+    min-height: 0;
+    padding: 6px;
+}
+
+.client-image {
+    margin: 0;
+}
+
+/* Match the title under quickshell_bar's window preview. */
+.client-title-text {
+    font-size: 14px;
+    font-weight: 400;
+    color: var(--text-color);
+}
+
+.client-workspace {
+    font-size: 12px;
+    border-radius: 0;
+}
+
+.client-thumbnail {
+    background: #17191f;
+}
+
+.client-preview {
+    margin: 6px;
+}
+
+
