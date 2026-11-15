@@ -1,5 +1,5 @@
 use crate::root::{Root, RootInit};
-use crate::socket::socket_handler;
+use crate::socket::{socket_handler, start_switch_event_listener};
 use crate::util;
 use crate::util::check_new_version;
 use crate::wm::configure_wm_initial;
@@ -61,6 +61,7 @@ pub fn start(
     }
 
     let (external_event_sender, external_event_receiver) = async_channel::unbounded();
+    start_switch_event_listener(external_event_sender.clone())?;
 
     if env::var_os("HYPRSHELL_NO_LISTENERS").is_none() {
         register_event_restarter(

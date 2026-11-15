@@ -102,7 +102,10 @@ pub fn apply_exec_bind_lua(bind: &ExecBind) -> anyhow::Result<()> {
                 Flag::Description(bind.desc.clone()),
             ]
         },
-        dispatcher: Dispatch::ExecCmd(bind.exec.clone(), None),
+        dispatcher: match &bind.event {
+            Some(event) => Dispatch::Event(event.clone()),
+            None => Dispatch::ExecCmd(bind.exec.clone(), None),
+        },
     };
     trace!("binding exec: {binding:?}");
     binding.unbind()?;
@@ -133,7 +136,10 @@ pub fn apply_exec_bind_legacy(bind: &ExecBind) -> anyhow::Result<()> {
         } else {
             &[binds::Flag::e]
         },
-        dispatcher: DispatchType::Exec(&bind.exec),
+        dispatcher: match &bind.event {
+            Some(event) => DispatchType::Custom("event", event),
+            None => DispatchType::Exec(&bind.exec),
+        },
     };
     trace!("binding exec: {binding:?}");
     binds::Binder::bind(binding).with_context(|| format!("binding exec failed: {bind:?}"))?;

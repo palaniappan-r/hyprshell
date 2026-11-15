@@ -1,6 +1,6 @@
 use config_lib::Windows;
-use core_lib::binds::{ExecBind, generate_transfer_socat};
-use core_lib::transfer::{CloseSwitch, ExternalTransferType, OpenSwitch};
+use core_lib::binds::{ExecBind, generate_transfer, generate_transfer_socat};
+use core_lib::transfer::{CloseSwitch, ExternalTransferType, OpenSwitch, SWITCH_EVENT_PREFIX};
 
 #[must_use]
 pub fn generate_open_keybinds(windows: &Windows) -> Vec<ExecBind> {
@@ -10,6 +10,7 @@ pub fn generate_open_keybinds(windows: &Windows) -> Vec<ExecBind> {
             mods: vec![overview.modifier.to_str()],
             key: overview.key.clone(),
             exec: generate_transfer_socat(&ExternalTransferType::OpenOverview),
+            event: None,
             release: false,
             desc: format!(
                 "Open Overview with {} + {}",
@@ -24,6 +25,12 @@ pub fn generate_open_keybinds(windows: &Windows) -> Vec<ExecBind> {
             exec: generate_transfer_socat(&ExternalTransferType::OpenSwitch(OpenSwitch {
                 reverse: false,
             })),
+            event: Some(format!(
+                "{SWITCH_EVENT_PREFIX}{}",
+                generate_transfer(&ExternalTransferType::OpenSwitch(OpenSwitch {
+                    reverse: false,
+                }))
+            )),
             release: false,
             desc: format!("Open Switch with {} + {}", switch.modifier, switch.key),
         });
@@ -33,6 +40,12 @@ pub fn generate_open_keybinds(windows: &Windows) -> Vec<ExecBind> {
             exec: generate_transfer_socat(&ExternalTransferType::OpenSwitch(OpenSwitch {
                 reverse: true,
             })),
+            event: Some(format!(
+                "{SWITCH_EVENT_PREFIX}{}",
+                generate_transfer(&ExternalTransferType::OpenSwitch(OpenSwitch {
+                    reverse: true,
+                }))
+            )),
             release: false,
             desc: format!("Open Switch (reverse) with {} + `", switch.modifier),
         });
@@ -42,6 +55,12 @@ pub fn generate_open_keybinds(windows: &Windows) -> Vec<ExecBind> {
             exec: generate_transfer_socat(&ExternalTransferType::OpenSwitch(OpenSwitch {
                 reverse: true,
             })),
+            event: Some(format!(
+                "{SWITCH_EVENT_PREFIX}{}",
+                generate_transfer(&ExternalTransferType::OpenSwitch(OpenSwitch {
+                    reverse: true,
+                }))
+            )),
             release: false,
             desc: format!(
                 "Open Switch (reverse) with {} + shift + {}",
@@ -54,6 +73,12 @@ pub fn generate_open_keybinds(windows: &Windows) -> Vec<ExecBind> {
             exec: generate_transfer_socat(&ExternalTransferType::CloseSwitch(CloseSwitch {
                 switch: true,
             })),
+            event: Some(format!(
+                "{SWITCH_EVENT_PREFIX}{}",
+                generate_transfer(&ExternalTransferType::CloseSwitch(CloseSwitch {
+                    switch: true,
+                }))
+            )),
             release: true,
             desc: format!(
                 "Close Switch (reverse) with {} + {}_l",
@@ -66,6 +91,12 @@ pub fn generate_open_keybinds(windows: &Windows) -> Vec<ExecBind> {
             exec: generate_transfer_socat(&ExternalTransferType::CloseSwitch(CloseSwitch {
                 switch: true,
             })),
+            event: Some(format!(
+                "{SWITCH_EVENT_PREFIX}{}",
+                generate_transfer(&ExternalTransferType::CloseSwitch(CloseSwitch {
+                    switch: true,
+                }))
+            )),
             release: true,
             desc: format!(
                 "Close Switch (reverse) with {} + {}_r",
@@ -78,6 +109,12 @@ pub fn generate_open_keybinds(windows: &Windows) -> Vec<ExecBind> {
             exec: generate_transfer_socat(&ExternalTransferType::CloseSwitch(CloseSwitch {
                 switch: true,
             })),
+            event: Some(format!(
+                "{SWITCH_EVENT_PREFIX}{}",
+                generate_transfer(&ExternalTransferType::CloseSwitch(CloseSwitch {
+                    switch: true,
+                }))
+            )),
             release: true,
             desc: "Close Switch (reverse) with shift + shift_l".to_string(),
         });
@@ -87,6 +124,12 @@ pub fn generate_open_keybinds(windows: &Windows) -> Vec<ExecBind> {
             exec: generate_transfer_socat(&ExternalTransferType::CloseSwitch(CloseSwitch {
                 switch: true,
             })),
+            event: Some(format!(
+                "{SWITCH_EVENT_PREFIX}{}",
+                generate_transfer(&ExternalTransferType::CloseSwitch(CloseSwitch {
+                    switch: true,
+                }))
+            )),
             release: true,
             desc: "Close Switch (reverse) with shift + shift_r".to_string(),
         });

@@ -1,6 +1,8 @@
 use crate::{ClientId, WorkspaceId};
 use serde::{Deserialize, Serialize};
 
+pub const SWITCH_EVENT_PREFIX: &str = "hyprshell-switch:";
+
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ExternalTransferType {
     /// send from the keybind to open the overview

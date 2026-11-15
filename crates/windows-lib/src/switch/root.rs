@@ -6,9 +6,9 @@ use core_lib::{Active, ByFirst, Direction, HyprlandData, SWITCH_NAMESPACE};
 use exec_lib::switch::{switch_client, switch_workspace};
 use gtk4_layer_shell::{KeyboardMode, Layer, LayerShell};
 use regex::Regex;
+use relm4::adw::gtk;
 use relm4::adw::gtk::glib;
 use relm4::adw::prelude::*;
-use relm4::adw::{self, gtk};
 use relm4::gtk::gdk::{Device, Key, ModifierType};
 use relm4::gtk::{EventControllerKey, Orientation, SelectionMode};
 use relm4::prelude::*;
@@ -16,17 +16,12 @@ use std::{cell::Cell, rc::Rc, time::Duration};
 use tracing::{debug, error, trace};
 
 const KILL_TIMEOUT: Duration = Duration::from_millis(200);
-const SHOW_DELAY: Duration = Duration::from_millis(150);
-const FADE_IN_MS: u32 = 120;
-const FADE_OUT_MS: u32 = 40;
-
 #[derive(Debug)]
 pub struct SwitchRoot {
     general: config_lib::WindowsGeneral,
     switch: config_lib::Switch,
     open: bool,
     show_generation: Rc<Cell<u64>>,
-    closing: bool,
     client_columns: u8,
     snapshot_session: crate::preview::SnapshotSession,
     snapshot_cache: crate::preview::SnapshotCache,
@@ -35,8 +30,6 @@ pub struct SwitchRoot {
     data: SwitchData,
     // gtk
     window: gtk::ApplicationWindow,
-    fade_in: adw::TimedAnimation,
-    fade_out: adw::TimedAnimation,
     controller: Option<gtk::EventController>,
     keyboard: Option<(Device, glib::SignalHandlerId)>,
     /// Regex for removing HTML tags from strings
@@ -52,8 +45,6 @@ pub enum SwitchRootInput {
     SetSwitch(config_lib::Switch),
     SetGeneral(config_lib::WindowsGeneral),
     OpenSwitch(Direction),
-    ShowSwitch(u64),
-    FinishClose(u64),
     CheckModifiers,
     Switch(Direction),
     CloseSwitch(bool),
@@ -143,49 +134,19 @@ impl SimpleComponent for SwitchRoot {
             }
         });
 
-        let fade_in = adw::TimedAnimation::new(
-            &root,
-            0.0,
-            1.0,
-            FADE_IN_MS,
-            adw::PropertyAnimationTarget::new(&root, "opacity"),
-        );
-        fade_in.set_easing(adw::Easing::EaseOutSine);
-        let weak_fade_in = fade_in.downgrade();
-        root.connect_map(move |_| {
-            if let Some(animation) = weak_fade_in.upgrade() {
-                animation.play();
-            }
-        });
         let show_generation = Rc::new(Cell::new(0));
-        let fade_out = adw::TimedAnimation::new(
-            &root,
-            1.0,
-            0.0,
-            FADE_OUT_MS,
-            adw::PropertyAnimationTarget::new(&root, "opacity"),
-        );
-        fade_out.set_easing(adw::Easing::EaseInSine);
-        let generation = Rc::clone(&show_generation);
-        let close_sender = sender.clone();
-        fade_out.connect_done(move |_| {
-            close_sender.input(SwitchRootInput::FinishClose(generation.get()));
-        });
 
         let model = Self {
             general: init.general,
             switch: init.switch,
             open: false,
             show_generation,
-            closing: false,
             client_columns: 1,
             snapshot_session: Default::default(),
             snapshot_cache: Default::default(),
             original_active: None,
             focused_active: None,
             window: root.clone(),
-            fade_in,
-            fade_out,
             controller: None,
             keyboard,
             remove_html: Regex::new(r"<[^>]*>").expect("invalid regex"),
@@ -226,44 +187,17 @@ impl SimpleComponent for SwitchRoot {
                     // the session; re-enqueueing could drop the final Tab.
                     self.navigate(direction);
                 } else {
-                    // A new tap takes precedence over a fading old popup.
-                    if self.closing {
-                        self.finish_close();
-                    }
                     self.open = self.prepare_switch(direction);
                     if self.open {
                         self.show_generation
                             .set(self.show_generation.get().wrapping_add(1));
-                        if self.switch.modifier == config_lib::Modifier::None {
-                            self.prepare_popup();
-                            self.show_switch();
-                        } else {
-                            // Focus on Tab, independently of the popup timer
-                            // and modifier release. Keep this session's MRU order.
+                        if self.switch.modifier != config_lib::Modifier::None {
+                            // Focus immediately, before building the popup.
                             self.focus_selected();
-                            let generation = self.show_generation.get();
-                            glib::timeout_add_local_once(SHOW_DELAY, move || {
-                                sender
-                                    .input_sender()
-                                    .emit(SwitchRootInput::ShowSwitch(generation));
-                            });
-                            // Build the cards now so their one-frame captures
-                            // can finish during SHOW_DELAY, before mapping.
-                            self.prepare_popup();
                         }
+                        self.prepare_popup();
+                        self.show_switch();
                     }
-                }
-            }
-            SwitchRootInput::ShowSwitch(generation) => {
-                // A quick release must not show the popup, and a timer from an
-                // earlier Alt-Tab must not shorten the delay for the next one.
-                if self.open && self.show_generation.get() == generation {
-                    self.show_switch();
-                }
-            }
-            SwitchRootInput::FinishClose(generation) => {
-                if self.closing && !self.open && self.show_generation.get() == generation {
-                    self.finish_close();
                 }
             }
             SwitchRootInput::CheckModifiers => {
@@ -426,10 +360,8 @@ impl SwitchRoot {
             retained_previews = self.snapshot_cache.borrow().len(),
             "Showing window switcher"
         );
-        self.fade_in.reset();
         self.window.set_can_target(true);
         self.window.set_keyboard_mode(KeyboardMode::Exclusive);
-        self.window.set_opacity(0.0);
         self.window.set_visible(true);
         self.window.grab_focus();
     }
@@ -638,19 +570,10 @@ impl SwitchRoot {
     fn close_switch(&mut self, do_switch: bool) {
         trace!("Hiding window {:?}", self.window.id());
         let was_visible = self.window.is_visible();
-        self.fade_in.pause();
-        if was_visible {
-            // Hand input back immediately; only the old popup's pixels linger.
-            self.window.set_can_target(false);
-            self.window.set_keyboard_mode(KeyboardMode::None);
-            WidgetExt::display(&self.window).flush();
-            self.closing = true;
-            self.fade_out.set_value_from(self.window.opacity());
-            self.fade_out.reset();
-            self.fade_out.play();
-        } else {
-            self.finish_close();
-        }
+        self.window.set_visible(false);
+        self.items.guard().clear();
+        self.clients_only.guard().clear();
+        self.snapshot_session.borrow_mut().clear();
 
         let target = close_focus_target(
             do_switch,
@@ -661,31 +584,23 @@ impl SwitchRoot {
         );
         if let Some(target) = target {
             if was_visible {
-                let generation = Rc::clone(&self.show_generation);
-                let closed_generation = generation.get();
-                let display = WidgetExt::display(&self.window);
-                glib::idle_add_local_once(move || {
-                    if generation.get() == closed_generation {
-                        // Ensure the compositor has released exclusive keyboard
-                        // focus, then switch without waiting for the fade-out.
-                        display.sync();
-                        focus_target(target);
-                    }
-                });
+                self.focus_after_surface_update(target);
             } else {
                 focus_target(target);
             }
         }
     }
 
-    fn finish_close(&mut self) {
-        self.closing = false;
-        self.fade_out.pause();
-        self.window.set_visible(false);
-        self.window.set_opacity(1.0);
-        self.items.guard().clear();
-        self.clients_only.guard().clear();
-        self.snapshot_session.borrow_mut().clear();
+    fn focus_after_surface_update(&self, target: Active) {
+        let generation = Rc::clone(&self.show_generation);
+        let closed_generation = generation.get();
+        let display = WidgetExt::display(&self.window);
+        glib::idle_add_local_once(move || {
+            if generation.get() == closed_generation {
+                display.sync();
+                focus_target(target);
+            }
+        });
     }
 
     fn close_item(&self) {

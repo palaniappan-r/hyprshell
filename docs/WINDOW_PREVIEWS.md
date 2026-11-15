@@ -5,8 +5,7 @@ Rust sources. There is no source-patching step. Source, scripts, binaries, and
 build artifacts live in this repository; `~/.config/hyprshell` contains only
 configuration, styles, and their backups.
 
-Each window card starts capturing one frame while the switcher popup is still
-hidden, during the Super+Tab hold delay. The last screenshot for each window
+Each window card starts capturing one frame as the switcher opens. The last screenshot for each window
 is shown immediately while a fresh frame loads. Windows without a cached
 frame use a plain dark thumbnail; there is no large icon placeholder.
 Capture startup and reads run on four background workers, limiting concurrent
@@ -24,16 +23,15 @@ focused monitor and reduces card sizes when needed. Captures use up to two
 physical pixels per logical pixel, capped at 720×450. Workspace badges and
 close actions are preserved.
 
-Super+Tab focuses the next window as soon as Tab is pressed. Further Tab or
-Shift+Tab presses before the popup appears also focus immediately, using a
-fixed window order for the held-Super session. The popup appears after 150 ms
-if Super is still held, with a 120 ms sine-eased fade-in. Releasing sooner keeps
-the already focused window without showing the popup or switching again. Once
-the popup is visible, navigation highlights previews and releasing Super
-focuses the selection.
-Closing releases keyboard focus immediately while the popup fades out over
-40 ms, then releases its snapshots and unfinished captures. Starting another
-switch cancels the old fade-out. Escape restores the window that was active
+Super+Tab focuses the next window and opens the popup immediately, with no
+intentional show delay or fades. Navigation highlights previews and releasing
+Super focuses the selection. The held-Super session keeps a fixed window order.
+Switcher keybindings send native compositor events over one subscribed socket,
+preserving press/release order without launching a helper process for each key.
+This prevents a late open message from arriving after release and opening a
+short-lived popup. The existing `hyprshell socat` interface remains available.
+Closing hides the popup immediately and releases its current snapshots and
+unfinished captures. Escape restores the window that was active
 before the session. Each title has a 16 px application icon to its left. A
 switcher configured without a modifier still opens the popup immediately.
 
